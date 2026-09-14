@@ -7,10 +7,13 @@
 
   <!-- PWA / iOS Safari meta tags -->
   <meta name="apple-mobile-web-app-capable" content="yes">
+  <!-- black-translucent lets content draw under status bar; we pad with safe-area-inset-top -->
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Charge Calc">
   <meta name="mobile-web-app-capable" content="yes">
-  <meta name="theme-color" content="#0066cc">
+  <meta name="theme-color" content="#1c1c1e" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#0066cc" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1c1c1e">
   <meta name="description" content="EV charging cost calculator – track home and outside charging sessions">
 
   <!-- Icons for iOS / Android -->
@@ -31,14 +34,25 @@
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
+    html, body {
+      height: 100%;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      background: white;
-      color: #000;
+      background: #1c1c1e;
+      color: #fff;
+      /* Prevent overscroll bounce revealing wrong color */
+      overscroll-behavior: none;
     }
     body.dark-mode { background: #1c1c1e; color: #fff; }
+    body:not(.dark-mode) { background: #fff; color: #000; }
     button { font-family: inherit; cursor: pointer; }
     input, select, textarea { font-family: inherit; font-size: inherit; }
+    /* Safe area helpers for notched iPhones */
+    .safe-top {
+      padding-top: max(12px, env(safe-area-inset-top, 0px));
+    }
+    .safe-bottom {
+      padding-bottom: max(8px, env(safe-area-inset-bottom, 0px));
+    }
   </style>
 </head>
 <body>
@@ -83,7 +97,7 @@
         batteryCapacity: 40,
         tariff: 8.5,
         currency: '₹',
-        darkMode: false,
+        darkMode: true,   // default dark mode for iPhone
       });
       const [currentSession, setCurrentSession] = useState({
         location: 'home',
@@ -403,28 +417,45 @@
         );
       }
 
+      // Keep body class in sync with dark mode
+      if (typeof document !== 'undefined') {
+        document.body.classList.toggle('dark-mode', isDark);
+      }
+
       return (
-        <div style={{ backgroundColor: bgColor, color: textColor, minHeight: '100vh', paddingBottom: 80 }}>
-          {/* Header */}
-          <div style={{ backgroundColor: isDark ? '#2c2c2e' : '#f5f5f5', padding: '20px 16px', borderBottom: `1px solid ${borderColor}`, position: 'sticky', top: 0, zIndex: 10 }}>
+        <div style={{
+          backgroundColor: bgColor,
+          color: textColor,
+          minHeight: '100vh',
+          // Space for bottom nav + home indicator
+          paddingBottom: 'calc(70px + env(safe-area-inset-bottom, 0px))',
+        }}>
+          {/* Header – padded below the iPhone status bar / Dynamic Island */}
+          <div style={{
+            backgroundColor: isDark ? '#2c2c2e' : '#f5f5f5',
+            paddingTop: 'max(12px, env(safe-area-inset-top, 0px))',
+            paddingLeft: 16,
+            paddingRight: 16,
+            paddingBottom: 14,
+            borderBottom: `1px solid ${borderColor}`,
+            position: 'sticky',
+            top: 0,
+            zIndex: 10,
+          }}>
             <div style={{ maxWidth: 600, margin: '0 auto', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div>
-                <h1 style={{ fontSize: 28, fontWeight: 'bold', margin: 0 }}>Charge Calc</h1>
+                <h1 style={{ fontSize: 24, fontWeight: 'bold', margin: 0, lineHeight: 1.2 }}>Charge Calc</h1>
                 <p style={{ fontSize: 12, color: isDark ? '#888' : '#666', margin: '4px 0 0 0' }}>
                   {settings.vehicleName} · ☁️ Cloud
                 </p>
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                {user.photoURL && (
-                  <img
-                    src={user.photoURL}
-                    alt=""
-                    style={{ width: 32, height: 32, borderRadius: '50%' }}
-                    referrerPolicy="no-referrer"
-                  />
-                )}
-                <button onClick={() => setScreen('settings')} style={{ background: 'none', border: 'none', fontSize: 24, cursor: 'pointer', color: textColor }}>⚙️</button>
-              </div>
+              <button
+                onClick={() => setScreen('settings')}
+                style={{ background: 'none', border: 'none', fontSize: 24, cursor: 'pointer', color: textColor, padding: 8, marginRight: -8 }}
+                aria-label="Settings"
+              >
+                ⚙️
+              </button>
             </div>
           </div>
 
@@ -854,8 +885,18 @@
             </div>
           )}
 
-          {/* Bottom Nav */}
-          <div style={{ position: 'fixed', bottom: 0, left: 0, right: 0, display: 'flex', backgroundColor: isDark ? '#2c2c2e' : 'white', borderTop: `1px solid ${borderColor}` }}>
+          {/* Bottom Nav – respects iPhone home indicator */}
+          <div style={{
+            position: 'fixed',
+            bottom: 0,
+            left: 0,
+            right: 0,
+            display: 'flex',
+            backgroundColor: isDark ? '#2c2c2e' : 'white',
+            borderTop: `1px solid ${borderColor}`,
+            paddingBottom: 'env(safe-area-inset-bottom, 0px)',
+            zIndex: 20,
+          }}>
             <button
               onClick={() => setScreen('dashboard')}
               style={{
