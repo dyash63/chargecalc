@@ -4,6 +4,1154 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Charge Calc</title>
-  <!-- Full content is large; the complete file is available in the artifacts and will be pushed correctly. -->
-  <p>Please use the local version or re-push.</p>
+
+  <!-- PWA / iOS Safari meta tags -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Charge Calc">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#1c1c1e" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#0066cc" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1c1c1e">
+  <meta name="description" content="EV charging cost calculator – track home and outside charging sessions">
+
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="icons/icon-180.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+  <link rel="icon" type="image/png" sizes="512x512" href="icons/icon-512.png">
+  <link rel="manifest" href="manifest.json">
+
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      height: 100%;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #1c1c1e;
+      color: #fff;
+      overscroll-behavior: none;
+    }
+    body.dark-mode { background: #1c1c1e; color: #fff; }
+    body:not(.dark-mode) { background: #fff; color: #000; }
+    button { font-family: inherit; cursor: pointer; }
+    input, select, textarea { font-family: inherit; font-size: inherit; }
+    .safe-top { padding-top: max(12px, env(safe-area-inset-top, 0px)); }
+    .safe-bottom { padding-bottom: max(8px, env(safe-area-inset-bottom, 0px)); }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    .toast {
+      position: fixed;
+      top: max(20px, env(safe-area-inset-top, 0px));
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 12px 20px;
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 600;
+      z-index: 1000;
+      animation: fadeIn 0.25s ease;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.25);
+      max-width: 90%;
+      text-align: center;
+    }
+    .fab {
+      position: fixed;
+      right: 20px;
+      bottom: calc(80px + env(safe-area-inset-bottom, 0px));
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      background: #0066cc;
+      color: white;
+      border: none;
+      font-size: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 4px 16px rgba(0,102,204,0.4);
+      z-index: 30;
+    }
+    .fab:active { transform: scale(0.95); }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyAFrVMSYatqbQHGmM_0-f723eyPmz8PCHQ",
+      authDomain: "chargecalc-eb2dd.firebaseapp.com",
+      projectId: "chargecalc-eb2dd",
+      storageBucket: "chargecalc-eb2dd.firebasestorage.app",
+      messagingSenderId: "218109228838",
+      appId: "1:218109228838:web:7a5f96c17e20e3897e73e7",
+      measurementId: "G-X9R6EDZHV2"
+    };
+
+    let db = null;
+    let auth = null;
+    let firebaseReady = false;
+    try {
+      firebase.initializeApp(firebaseConfig);
+      auth = firebase.auth();
+      db = firebase.firestore();
+      firebaseReady = true;
+    } catch (e) {
+      console.warn("Firebase init failed", e);
+    }
+
+    // ---------- Local storage helpers ----------
+    const LS_SESSIONS = 'chargecalc_sessions';
+    const LS_SETTINGS = 'chargecalc_settings';
+    const LS_PENDING = 'chargecalc_pending';
+
+    function loadLocal(key, fallback) {
+      try {
+        const raw = localStorage.getItem(key);
+        return raw ? JSON.parse(raw) : fallback;
+      } catch { return fallback; }
+    }
+    function saveLocal(key, value) {
+      try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+    }
+
+    function ChargeCalcEV() {
+      const [user, setUser] = useState(null);
+      const [authLoading, setAuthLoading] = useState(true);
+      const [screen, setScreen] = useState('dashboard');
+      const [sessions, setSessions] = useState(() => loadLocal(LS_SESSIONS, []));
+      const [settings, setSettings] = useState(() => loadLocal(LS_SETTINGS, {
+        vehicleName: 'Tata Punch EV',
+        batteryCapacity: 40,
+        tariff: 8.5,
+        currency: '₹',
+        darkMode: true,
+        inputMode: 'percent',
+      }));
+      const [currentSession, setCurrentSession] = useState({
+        location: 'home',
+        startPercent: null,
+        endPercent: null,
+        energyKwh: null,
+        notes: '',
+        customRate: null,
+        date: new Date().toISOString().slice(0, 16),
+      });
+      const [editingId, setEditingId] = useState(null);
+      const [loading, setLoading] = useState(false);
+      const [saving, setSaving] = useState(false);
+      const [syncStatus, setSyncStatus] = useState('local');
+      const [authError, setAuthError] = useState('');
+      const [toast, setToast] = useState(null);
+      const [historyFilter, setHistoryFilter] = useState({ location: 'all', month: 'all' });
+      const [isOnline, setIsOnline] = useState(navigator.onLine);
+      const pendingRef = useRef(loadLocal(LS_PENDING, []));
+      const settingsLoaded = useRef(false);
+
+      const showToast = (msg, type = 'success') => {
+        setToast({ msg, type });
+        setTimeout(() => setToast(null), 2800);
+      };
+
+      // ---------- Online / offline ----------
+      useEffect(() => {
+        const onOnline = () => { setIsOnline(true); setSyncStatus(user ? 'cloud' : 'local'); };
+        const onOffline = () => { setIsOnline(false); setSyncStatus('offline'); };
+        window.addEventListener('online', onOnline);
+        window.addEventListener('offline', onOffline);
+        return () => {
+          window.removeEventListener('online', onOnline);
+          window.removeEventListener('offline', onOffline);
+        };
+      }, [user]);
+
+      // Persist sessions & settings locally
+      useEffect(() => { saveLocal(LS_SESSIONS, sessions); }, [sessions]);
+      useEffect(() => {
+        if (settingsLoaded.current) saveLocal(LS_SETTINGS, settings);
+      }, [settings]);
+
+      // ---------- Auth listener ----------
+      useEffect(() => {
+        if (!firebaseReady || !auth) {
+          setAuthLoading(false);
+          return;
+        }
+        const unsub = auth.onAuthStateChanged((u) => {
+          setUser(u);
+          setAuthLoading(false);
+          if (!u) {
+            setSyncStatus(isOnline ? 'local' : 'offline');
+          }
+        });
+        return () => unsub();
+      }, [isOnline]);
+
+      // ---------- Load cloud data when signed in ----------
+      useEffect(() => {
+        if (!user || !firebaseReady || !db || !isOnline) return;
+
+        async function loadData() {
+          setLoading(true);
+          setSyncStatus('syncing');
+          try {
+            const sessionsSnap = await db
+              .collection('users').doc(user.uid)
+              .collection('sessions').orderBy('date', 'desc').get();
+
+            const cloudSessions = sessionsSnap.docs.map((doc) => ({
+              id: doc.id,
+              ...doc.data(),
+            }));
+
+            const localOnly = sessions.filter(s => s._local && !cloudSessions.find(c => c.id === s.id));
+            const merged = [...cloudSessions, ...localOnly].sort((a, b) => new Date(b.date) - new Date(a.date));
+            setSessions(merged);
+
+            const settingsDoc = await db
+              .collection('users').doc(user.uid)
+              .collection('settings').doc('user').get();
+
+            if (settingsDoc.exists) {
+              setSettings((prev) => ({ ...prev, ...settingsDoc.data() }));
+            }
+            settingsLoaded.current = true;
+            setSyncStatus('cloud');
+
+            await flushPending(user.uid);
+          } catch (err) {
+            console.error('Load error:', err);
+            setSyncStatus(isOnline ? 'local' : 'offline');
+            showToast('Could not sync – using local data', 'error');
+          } finally {
+            setLoading(false);
+          }
+        }
+        loadData();
+      }, [user, isOnline]);
+
+      // ---------- Save settings to cloud ----------
+      useEffect(() => {
+        if (!user || !firebaseReady || !db || loading || authLoading || !isOnline || !settingsLoaded.current) return;
+        const t = setTimeout(async () => {
+          try {
+            await db.collection('users').doc(user.uid)
+              .collection('settings').doc('user')
+              .set(settings, { merge: true });
+          } catch (err) {
+            console.error('Settings save error:', err);
+          }
+        }, 600);
+        return () => clearTimeout(t);
+      }, [settings, user, loading, authLoading, isOnline]);
+
+      // ---------- Pending queue helpers ----------
+      function addPending(op) {
+        pendingRef.current = [...pendingRef.current, op];
+        saveLocal(LS_PENDING, pendingRef.current);
+      }
+
+      async function flushPending(uid) {
+        if (!pendingRef.current.length || !db || !isOnline) return;
+        const remaining = [];
+        for (const op of pendingRef.current) {
+          try {
+            if (op.type === 'add') {
+              await db.collection('users').doc(uid).collection('sessions').doc(op.id).set(op.data);
+            } else if (op.type === 'update') {
+              await db.collection('users').doc(uid).collection('sessions').doc(op.id).set(op.data, { merge: true });
+            } else if (op.type === 'delete') {
+              await db.collection('users').doc(uid).collection('sessions').doc(op.id).delete();
+            }
+          } catch (e) {
+            console.warn('Pending op failed', op, e);
+            remaining.push(op);
+          }
+        }
+        pendingRef.current = remaining;
+        saveLocal(LS_PENDING, remaining);
+      }
+
+      // ---------- Auth ----------
+      const signInWithGoogle = async () => {
+        setAuthError('');
+        if (!auth) {
+          setAuthError('Firebase Auth not ready');
+          return;
+        }
+        try {
+          const provider = new firebase.auth.GoogleAuthProvider();
+          await auth.signInWithPopup(provider);
+        } catch (err) {
+          console.error('Sign-in error:', err);
+          setAuthError(err.message || 'Sign-in failed');
+        }
+      };
+
+      const signOut = async () => {
+        if (!auth) return;
+        try {
+          await auth.signOut();
+          setScreen('dashboard');
+        } catch (err) {
+          console.error('Sign-out error:', err);
+        }
+      };
+
+      // ---------- Cost calculation ----------
+      const calculateChargingCost = () => {
+        const mode = settings.inputMode || 'percent';
+        let energyAdded = null;
+        let chargeAdded = null;
+
+        if (mode === 'kwh') {
+          if (currentSession.energyKwh === null || currentSession.energyKwh === '' || isNaN(currentSession.energyKwh)) return null;
+          energyAdded = parseFloat(currentSession.energyKwh);
+          if (energyAdded <= 0) return null;
+          chargeAdded = settings.batteryCapacity > 0
+            ? (energyAdded / settings.batteryCapacity) * 100
+            : null;
+        } else {
+          if (currentSession.startPercent === null || currentSession.endPercent === null) return null;
+          if (currentSession.endPercent < currentSession.startPercent) return null;
+          chargeAdded = currentSession.endPercent - currentSession.startPercent;
+          energyAdded = (settings.batteryCapacity * chargeAdded) / 100;
+        }
+
+        let rateUsed = null;
+        if (currentSession.location === 'home') {
+          rateUsed = currentSession.customRate ?? settings.tariff;
+        } else {
+          if (currentSession.customRate === null || currentSession.customRate === undefined || isNaN(currentSession.customRate)) {
+            return null;
+          }
+          rateUsed = currentSession.customRate;
+        }
+
+        const cost = energyAdded * rateUsed;
+        return {
+          chargeAdded: chargeAdded !== null ? Number(chargeAdded.toFixed(1)) : null,
+          energyAdded: Number(energyAdded.toFixed(2)),
+          cost: Number(cost.toFixed(2)),
+          rateUsed,
+        };
+      };
+
+      // ---------- Log / Update session ----------
+      const saveSession = async () => {
+        const calculation = calculateChargingCost();
+        if (!calculation) return;
+
+        setSaving(true);
+        const sessionData = {
+          date: currentSession.date ? new Date(currentSession.date).toISOString() : new Date().toISOString(),
+          location: currentSession.location,
+          startPercent: currentSession.startPercent,
+          endPercent: currentSession.endPercent,
+          energyKwhInput: currentSession.energyKwh,
+          chargeAdded: calculation.chargeAdded,
+          energyAdded: calculation.energyAdded,
+          cost: calculation.cost,
+          rateUsed: calculation.rateUsed,
+          notes: currentSession.notes || '',
+          inputMode: settings.inputMode || 'percent',
+        };
+
+        try {
+          if (editingId) {
+            const updated = { ...sessionData };
+            if (user && isOnline && db) {
+              await db.collection('users').doc(user.uid).collection('sessions').doc(editingId).set(updated, { merge: true });
+            } else {
+              addPending({ type: 'update', id: editingId, data: updated });
+            }
+            setSessions(prev => prev.map(s => s.id === editingId ? { ...s, ...updated } : s)
+              .sort((a, b) => new Date(b.date) - new Date(a.date)));
+            showToast('Session updated');
+          } else {
+            let id = null;
+            if (user && isOnline && db) {
+              const docRef = await db.collection('users').doc(user.uid).collection('sessions').add(sessionData);
+              id = docRef.id;
+            } else {
+              id = 'local_' + Date.now();
+              sessionData._local = true;
+              addPending({ type: 'add', id, data: sessionData });
+            }
+            setSessions(prev => [{ id, ...sessionData }, ...prev]);
+            showToast(user && isOnline ? 'Session saved' : 'Saved offline – will sync later');
+          }
+
+          setCurrentSession({
+            location: 'home',
+            startPercent: null,
+            endPercent: null,
+            energyKwh: null,
+            notes: '',
+            customRate: null,
+            date: new Date().toISOString().slice(0, 16),
+          });
+          setEditingId(null);
+          setScreen('dashboard');
+        } catch (err) {
+          console.error('Save session error:', err);
+          showToast('Could not save session', 'error');
+        } finally {
+          setSaving(false);
+        }
+      };
+
+      // ---------- Delete session ----------
+      const deleteSession = async (id) => {
+        if (!confirm('Delete this charging session?')) return;
+        try {
+          if (user && isOnline && db && !String(id).startsWith('local_')) {
+            await db.collection('users').doc(user.uid).collection('sessions').doc(id).delete();
+          } else {
+            addPending({ type: 'delete', id });
+          }
+          setSessions(prev => prev.filter(s => s.id !== id));
+          showToast('Session deleted');
+        } catch (err) {
+          console.error('Delete error:', err);
+          showToast('Could not delete', 'error');
+        }
+      };
+
+      // ---------- Start edit ----------
+      const startEdit = (session) => {
+        setEditingId(session.id);
+        setCurrentSession({
+          location: session.location || 'home',
+          startPercent: session.startPercent ?? null,
+          endPercent: session.endPercent ?? null,
+          energyKwh: session.energyKwhInput ?? session.energyAdded ?? null,
+          notes: session.notes || '',
+          customRate: session.rateUsed ?? null,
+          date: session.date ? new Date(session.date).toISOString().slice(0, 16) : new Date().toISOString().slice(0, 16),
+        });
+        if (session.inputMode) {
+          setSettings(s => ({ ...s, inputMode: session.inputMode }));
+        }
+        setScreen('log');
+      };
+
+      // ---------- Monthly stats ----------
+      const getMonthlyStats = () => {
+        const now = new Date();
+        const currentMonth = now.getMonth();
+        const currentYear = now.getFullYear();
+
+        const monthSessions = sessions.filter((s) => {
+          const date = new Date(s.date);
+          return date.getMonth() === currentMonth && date.getFullYear() === currentYear;
+        });
+
+        let totalSpent = 0, totalEnergy = 0, homeEnergy = 0, outsideEnergy = 0;
+        monthSessions.forEach((s) => {
+          totalEnergy += s.energyAdded || 0;
+          totalSpent += s.cost || 0;
+          if (s.location === 'home') homeEnergy += s.energyAdded || 0;
+          else outsideEnergy += s.energyAdded || 0;
+        });
+
+        return {
+          totalSpent: totalSpent.toFixed(2),
+          totalEnergy: totalEnergy.toFixed(1),
+          homeEnergy: homeEnergy.toFixed(1),
+          outsideEnergy: outsideEnergy.toFixed(1),
+          totalSessions: monthSessions.length,
+          avgCost: monthSessions.length > 0 ? (totalSpent / monthSessions.length).toFixed(2) : '0.00',
+          avgRate: totalEnergy > 0 ? (totalSpent / totalEnergy).toFixed(2) : '0.00',
+        };
+      };
+
+      // ---------- Filtered history ----------
+      const getFilteredSessions = () => {
+        return sessions.filter(s => {
+          if (historyFilter.location !== 'all' && s.location !== historyFilter.location) return false;
+          if (historyFilter.month !== 'all') {
+            const d = new Date(s.date);
+            const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+            if (key !== historyFilter.month) return false;
+          }
+          return true;
+        });
+      };
+
+      const getAvailableMonths = () => {
+        const set = new Set();
+        sessions.forEach(s => {
+          const d = new Date(s.date);
+          set.add(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
+        });
+        return Array.from(set).sort().reverse();
+      };
+
+      const formatDate = (isoString) => {
+        const date = new Date(isoString);
+        const today = new Date();
+        if (date.toDateString() === today.toDateString()) return 'Today';
+        const yesterday = new Date(today);
+        yesterday.setDate(yesterday.getDate() - 1);
+        if (date.toDateString() === yesterday.toDateString()) return 'Yesterday';
+        return date.toLocaleDateString('en-IN', { month: 'short', day: 'numeric', year: 'numeric' });
+      };
+
+      const formatMonthLabel = (ym) => {
+        const [y, m] = ym.split('-');
+        const d = new Date(Number(y), Number(m) - 1);
+        return d.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+      };
+
+      const calculation = calculateChargingCost();
+      const isDark = settings.darkMode;
+      const bgColor = isDark ? '#1c1c1e' : '#fff';
+      const textColor = isDark ? '#fff' : '#000';
+      const cardBg = isDark ? '#2c2c2e' : '#f5f5f5';
+      const borderColor = isDark ? '#444' : '#e5e5e5';
+      const muted = isDark ? '#888' : '#666';
+      const stats = getMonthlyStats();
+      const filtered = getFilteredSessions();
+      const months = getAvailableMonths();
+
+      if (typeof document !== 'undefined') {
+        document.body.classList.toggle('dark-mode', isDark);
+      }
+
+      if (authLoading) {
+        return (
+          <div style={{ backgroundColor: bgColor, color: textColor, minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <p>Loading Charge Calc…</p>
+          </div>
+        );
+      }
+
+      if (!user) {
+        return (
+          <div style={{ backgroundColor: bgColor, color: textColor, minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+            <div style={{ textAlign: 'center', maxWidth: 360 }}>
+              <div style={{ fontSize: 48, marginBottom: 12 }}>⚡</div>
+              <h1 style={{ fontSize: 28, fontWeight: 'bold', marginBottom: 8 }}>Charge Calc</h1>
+              <p style={{ fontSize: 15, color: muted, marginBottom: 32 }}>
+                Track home & outside EV charging costs
+              </p>
+
+              <button
+                onClick={signInWithGoogle}
+                style={{
+                  width: '100%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 12,
+                  padding: '14px 20px',
+                  backgroundColor: '#fff',
+                  color: '#333',
+                  border: '1px solid #ddd',
+                  borderRadius: 12,
+                  fontSize: 16,
+                  fontWeight: 600,
+                  boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+                }}
+              >
+                <svg width="20" height="20" viewBox="0 0 48 48">
+                  <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+                  <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+                  <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+                  <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+                </svg>
+                Sign in with Google
+              </button>
+
+              {authError && (
+                <p style={{ marginTop: 16, color: '#e53935', fontSize: 13 }}>{authError}</p>
+              )}
+
+              <p style={{ marginTop: 24, fontSize: 12, color: isDark ? '#666' : '#999' }}>
+                Your charging data is private and stored securely.<br/>
+                Works offline too.
+              </p>
+            </div>
+          </div>
+        );
+      }
+
+      if (loading) {
+        return (
+          <div style={{ backgroundColor: bgColor, color: textColor, minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <p>Loading your data…</p>
+          </div>
+        );
+      }
+
+      const syncLabel = {
+        cloud: '☁️ Cloud',
+        local: '💾 Local',
+        offline: '📴 Offline',
+        syncing: '🔄 Syncing…',
+      }[syncStatus] || '💾 Local';
+
+      return (
+        <div style={{
+          backgroundColor: bgColor,
+          color: textColor,
+          minHeight: '100vh',
+          paddingBottom: 'calc(70px + env(safe-area-inset-bottom, 0px))',
+        }}>
+          {toast && (
+            <div className="toast" style={{
+              backgroundColor: toast.type === 'error' ? '#c62828' : '#2e7d32',
+              color: '#fff',
+            }}>
+              {toast.msg}
+            </div>
+          )}
+
+          <div style={{
+            backgroundColor: isDark ? '#2c2c2e' : '#f5f5f5',
+            paddingTop: 'max(12px, env(safe-area-inset-top, 0px))',
+            paddingLeft: 16,
+            paddingRight: 16,
+            paddingBottom: 14,
+            borderBottom: `1px solid ${borderColor}`,
+            position: 'sticky',
+            top: 0,
+            zIndex: 10,
+          }}>
+            <div style={{ maxWidth: 600, margin: '0 auto', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <h1 style={{ fontSize: 24, fontWeight: 'bold', margin: 0, lineHeight: 1.2 }}>Charge Calc</h1>
+                <p style={{ fontSize: 12, color: muted, margin: '4px 0 0 0' }}>
+                  {settings.vehicleName} · {syncLabel}
+                </p>
+              </div>
+              <button
+                onClick={() => setScreen('settings')}
+                style={{ background: 'none', border: 'none', fontSize: 24, cursor: 'pointer', color: textColor, padding: 8, marginRight: -8 }}
+                aria-label="Settings"
+              >
+                ⚙️
+              </button>
+            </div>
+          </div>
+
+          {screen === 'dashboard' && (
+            <div style={{ maxWidth: 600, margin: '0 auto', padding: '16px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
+                <div style={{ backgroundColor: isDark ? '#2c2c2e' : '#f0f4ff', padding: 16, borderRadius: 12, border: `1px solid ${isDark ? '#444' : '#d0d8ff'}` }}>
+                  <p style={{ fontSize: 12, color: '#0066cc', fontWeight: 'bold', margin: '0 0 8px 0' }}>This Month</p>
+                  <p style={{ fontSize: 24, fontWeight: 'bold', margin: '0 0 4px 0' }}>{settings.currency}{stats.totalSpent}</p>
+                  <p style={{ fontSize: 12, color: muted, margin: 0 }}>Total Spent</p>
+                </div>
+                <div style={{ backgroundColor: isDark ? '#2c2c2e' : '#f0fff4', padding: 16, borderRadius: 12, border: `1px solid ${isDark ? '#444' : '#d0f0d8'}` }}>
+                  <p style={{ fontSize: 12, color: '#28a745', fontWeight: 'bold', margin: '0 0 8px 0' }}>Energy</p>
+                  <p style={{ fontSize: 24, fontWeight: 'bold', margin: '0 0 4px 0' }}>{stats.totalEnergy} kWh</p>
+                  <p style={{ fontSize: 12, color: muted, margin: 0 }}>This Month</p>
+                </div>
+              </div>
+
+              <div style={{ backgroundColor: cardBg, borderRadius: 12, padding: 16, marginBottom: 16, border: `1px solid ${borderColor}` }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12, textAlign: 'center' }}>
+                  <div>
+                    <p style={{ fontSize: 18, fontWeight: 'bold', margin: 0 }}>{stats.totalSessions}</p>
+                    <p style={{ fontSize: 11, color: muted, margin: '4px 0 0' }}>Sessions</p>
+                  </div>
+                  <div>
+                    <p style={{ fontSize: 18, fontWeight: 'bold', margin: 0 }}>{settings.currency}{stats.avgCost}</p>
+                    <p style={{ fontSize: 11, color: muted, margin: '4px 0 0' }}>Avg / session</p>
+                  </div>
+                  <div>
+                    <p style={{ fontSize: 18, fontWeight: 'bold', margin: 0 }}>{settings.currency}{stats.avgRate}</p>
+                    <p style={{ fontSize: 11, color: muted, margin: '4px 0 0' }}>Avg / kWh</p>
+                  </div>
+                </div>
+                {(Number(stats.homeEnergy) > 0 || Number(stats.outsideEnergy) > 0) && (
+                  <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${borderColor}`, display: 'flex', justifyContent: 'space-around', fontSize: 13 }}>
+                    <span>🏠 {stats.homeEnergy} kWh</span>
+                    <span>📍 {stats.outsideEnergy} kWh</span>
+                  </div>
+                )}
+              </div>
+
+              <button
+                onClick={() => {
+                  setEditingId(null);
+                  setCurrentSession({
+                    location: 'home',
+                    startPercent: null,
+                    endPercent: null,
+                    energyKwh: null,
+                    notes: '',
+                    customRate: null,
+                    date: new Date().toISOString().slice(0, 16),
+                  });
+                  setScreen('log');
+                }}
+                style={{
+                  width: '100%',
+                  backgroundColor: '#0066cc',
+                  color: 'white',
+                  border: 'none',
+                  padding: 16,
+                  borderRadius: 12,
+                  fontSize: 16,
+                  fontWeight: 600,
+                  marginBottom: 20,
+                }}
+              >
+                + Log Charging Session
+              </button>
+
+              <h3 style={{ fontSize: 15, fontWeight: 'bold', marginBottom: 12 }}>Recent</h3>
+              {sessions.length === 0 ? (
+                <div style={{ backgroundColor: cardBg, padding: '32px 16px', borderRadius: 12, textAlign: 'center', color: muted }}>
+                  <p style={{ fontSize: 32, marginBottom: 8 }}>⚡</p>
+                  <p>No sessions yet</p>
+                  <p style={{ fontSize: 13, marginTop: 4 }}>Log your first charge above</p>
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {sessions.slice(0, 5).map((session) => (
+                    <div key={session.id} style={{ backgroundColor: cardBg, padding: 14, borderRadius: 10, border: `1px solid ${borderColor}` }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                        <div>
+                          <div style={{ fontSize: 14, fontWeight: 600 }}>
+                            {session.chargeAdded != null
+                              ? `${session.startPercent ?? '—'}% → ${session.endPercent ?? '—'}%`
+                              : `${session.energyAdded} kWh`}
+                            <span style={{
+                              marginLeft: 8, fontSize: 11, padding: '2px 6px', borderRadius: 4,
+                              backgroundColor: session.location === 'home' ? (isDark ? '#1a3a5c' : '#e3f2fd') : (isDark ? '#4a2c0a' : '#fff3e0'),
+                              color: session.location === 'home' ? '#64b5f6' : '#ffb74d',
+                            }}>
+                              {session.location === 'home' ? '🏠 Home' : '📍 Outside'}
+                            </span>
+                            {session._local && <span style={{ marginLeft: 6, fontSize: 10, color: muted }}>offline</span>}
+                          </div>
+                          <div style={{ fontSize: 12, color: muted, marginTop: 4 }}>{formatDate(session.date)}</div>
+                        </div>
+                        <div style={{ textAlign: 'right' }}>
+                          <div style={{ fontWeight: 'bold' }}>{settings.currency}{session.cost}</div>
+                          <div style={{ fontSize: 11, color: muted }}>{session.energyAdded} kWh</div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                  {sessions.length > 5 && (
+                    <button onClick={() => setScreen('history')} style={{ background: 'none', border: 'none', color: '#0066cc', fontWeight: 600, padding: 8 }}>
+                      View all →
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {screen === 'log' && (
+            <div style={{ maxWidth: 600, margin: '0 auto', padding: '16px' }}>
+              <div style={{ display: 'flex', gap: 12, marginBottom: 16, alignItems: 'center' }}>
+                <button onClick={() => { setScreen('dashboard'); setEditingId(null); }} style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer', color: textColor }}>←</button>
+                <h2 style={{ fontSize: 20, fontWeight: 'bold', margin: 0 }}>{editingId ? 'Edit Session' : 'Log Charge'}</h2>
+              </div>
+
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 13, fontWeight: 'bold', display: 'block', marginBottom: 8 }}>Location</label>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  {['home', 'outside'].map(loc => (
+                    <button
+                      key={loc}
+                      onClick={() => setCurrentSession({ ...currentSession, location: loc, customRate: loc === 'home' ? null : currentSession.customRate })}
+                      style={{
+                        flex: 1, padding: 12, borderRadius: 10, border: `2px solid ${currentSession.location === loc ? '#0066cc' : borderColor}`,
+                        backgroundColor: currentSession.location === loc ? (isDark ? '#1a3a5c' : '#e3f2fd') : cardBg,
+                        color: textColor, fontWeight: 600, fontSize: 14,
+                      }}
+                    >
+                      {loc === 'home' ? '🏠 Home' : '📍 Outside'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 13, fontWeight: 'bold', display: 'block', marginBottom: 8 }}>Input by</label>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  {[{ id: 'percent', label: 'Battery %' }, { id: 'kwh', label: 'kWh' }].map(m => (
+                    <button
+                      key={m.id}
+                      onClick={() => setSettings(s => ({ ...s, inputMode: m.id }))}
+                      style={{
+                        flex: 1, padding: 10, borderRadius: 10, border: `2px solid ${(settings.inputMode || 'percent') === m.id ? '#0066cc' : borderColor}`,
+                        backgroundColor: (settings.inputMode || 'percent') === m.id ? (isDark ? '#1a3a5c' : '#e3f2fd') : cardBg,
+                        color: textColor, fontWeight: 600, fontSize: 14,
+                      }}
+                    >
+                      {m.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {(settings.inputMode || 'percent') === 'percent' ? (
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
+                  <div>
+                    <label style={{ fontSize: 13, fontWeight: 'bold', display: 'block', marginBottom: 6 }}>Start %</label>
+                    <input
+                      type="number" min="0" max="100" step="1"
+                      value={currentSession.startPercent ?? ''}
+                      onChange={e => setCurrentSession({ ...currentSession, startPercent: e.target.value === '' ? null : Number(e.target.value) })}
+                      placeholder="e.g. 20"
+                      style={{ width: '100%', padding: 12, borderRadius: 10, border: `1px solid ${borderColor}`, backgroundColor: cardBg, color: textColor }}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 13, fontWeight: 'bold', display: 'block', marginBottom: 6 }}>End %</label>
+                    <input
+                      type="number" min="0" max="100" step="1"
+                      value={currentSession.endPercent ?? ''}
+                      onChange={e => setCurrentSession({ ...currentSession, endPercent: e.target.value === '' ? null : Number(e.target.value) })}
+                      placeholder="e.g. 80"
+                      style={{ width: '100%', padding: 12, borderRadius: 10, border: `1px solid ${borderColor}`, backgroundColor: cardBg, color: textColor }}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <div style={{ marginBottom: 16 }}>
+                  <label style={{ fontSize: 13, fontWeight: 'bold', display: 'block', marginBottom: 6 }}>Energy added (kWh)</label>
+                  <input
+                    type="number" min="0" step="0.1"
+                    value={currentSession.energyKwh ?? ''}
+                    onChange={e => setCurrentSession({ ...currentSession, energyKwh: e.target.value === '' ? null : Number(e.target.value) })}
+                    placeholder="e.g. 18.5"
+                    style={{ width: '100%', padding: 12, borderRadius: 10, border: `1px solid ${borderColor}`, backgroundColor: cardBg, color: textColor }}
+                  />
+                </div>
+              )}
+
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 13, fontWeight: 'bold', display: 'block', marginBottom: 6 }}>
+                  {currentSession.location === 'home' ? 'Rate (optional override)' : 'Rate (required)'} · {settings.currency}/kWh
+                </label>
+                <input
+                  type="number" min="0" step="0.1"
+                  value={currentSession.customRate ?? ''}
+                  onChange={e => setCurrentSession({ ...currentSession, customRate: e.target.value === '' ? null : Number(e.target.value) })}
+                  placeholder={currentSession.location === 'home' ? `Default: ${settings.tariff}` : 'e.g. 18'}
+                  style={{ width: '100%', padding: 12, borderRadius: 10, border: `1px solid ${borderColor}`, backgroundColor: cardBg, color: textColor }}
+                />
+              </div>
+
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 13, fontWeight: 'bold', display: 'block', marginBottom: 6 }}>Date & time</label>
+                <input
+                  type="datetime-local"
+                  value={currentSession.date || ''}
+                  onChange={e => setCurrentSession({ ...currentSession, date: e.target.value })}
+                  style={{ width: '100%', padding: 12, borderRadius: 10, border: `1px solid ${borderColor}`, backgroundColor: cardBg, color: textColor }}
+                />
+              </div>
+
+              {calculation && (
+                <div style={{ backgroundColor: isDark ? '#1a3a5c' : '#e3f2fd', padding: 16, borderRadius: 12, marginBottom: 16, border: `1px solid ${isDark ? '#0066cc' : '#90caf9'}` }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, fontSize: 13 }}>
+                    <span>Energy</span>
+                    <span style={{ fontWeight: 'bold' }}>{calculation.energyAdded} kWh</span>
+                  </div>
+                  {calculation.chargeAdded != null && (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, fontSize: 13 }}>
+                      <span>Charge Added</span>
+                      <span style={{ fontWeight: 'bold' }}>{calculation.chargeAdded}%</span>
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, fontSize: 13 }}>
+                    <span>Rate Used</span>
+                    <span style={{ fontWeight: 'bold' }}>{settings.currency}{calculation.rateUsed}/kWh</span>
+                  </div>
+                  <div style={{ borderTop: `1px solid ${isDark ? '#0066cc' : '#90caf9'}`, paddingTop: 8, marginTop: 8, display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ fontSize: 14, fontWeight: 'bold' }}>Cost</span>
+                    <span style={{ fontSize: 22, fontWeight: 'bold' }}>{settings.currency}{calculation.cost}</span>
+                  </div>
+                </div>
+              )}
+
+              <div style={{ marginBottom: 20 }}>
+                <label style={{ fontSize: 13, fontWeight: 'bold', display: 'block', marginBottom: 6 }}>Notes (optional)</label>
+                <textarea
+                  placeholder="e.g. Supercharger, mall, highway stop…"
+                  value={currentSession.notes}
+                  onChange={e => setCurrentSession({ ...currentSession, notes: e.target.value })}
+                  style={{ width: '100%', padding: 12, borderRadius: 10, border: `1px solid ${borderColor}`, backgroundColor: cardBg, color: textColor, fontFamily: 'inherit' }}
+                  rows="2"
+                />
+              </div>
+
+              <button
+                onClick={saveSession}
+                disabled={saving || !calculation}
+                style={{
+                  width: '100%',
+                  backgroundColor: calculation ? '#0066cc' : (isDark ? '#333' : '#ccc'),
+                  color: 'white',
+                  border: 'none',
+                  padding: 16,
+                  borderRadius: 12,
+                  fontSize: 16,
+                  fontWeight: 600,
+                  opacity: saving ? 0.7 : 1,
+                }}
+              >
+                {saving ? 'Saving…' : (editingId ? 'Update Session' : 'Save Session')}
+              </button>
+            </div>
+          )}
+
+          {screen === 'history' && (
+            <div style={{ maxWidth: 600, margin: '0 auto', padding: '16px' }}>
+              <h2 style={{ fontSize: 20, fontWeight: 'bold', marginBottom: 16 }}>History</h2>
+
+              <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
+                <select
+                  value={historyFilter.location}
+                  onChange={e => setHistoryFilter(f => ({ ...f, location: e.target.value }))}
+                  style={{ padding: '8px 12px', borderRadius: 8, border: `1px solid ${borderColor}`, backgroundColor: cardBg, color: textColor, fontSize: 13 }}
+                >
+                  <option value="all">All locations</option>
+                  <option value="home">🏠 Home</option>
+                  <option value="outside">📍 Outside</option>
+                </select>
+                <select
+                  value={historyFilter.month}
+                  onChange={e => setHistoryFilter(f => ({ ...f, month: e.target.value }))}
+                  style={{ padding: '8px 12px', borderRadius: 8, border: `1px solid ${borderColor}`, backgroundColor: cardBg, color: textColor, fontSize: 13 }}
+                >
+                  <option value="all">All months</option>
+                  {months.map(m => (
+                    <option key={m} value={m}>{formatMonthLabel(m)}</option>
+                  ))}
+                </select>
+              </div>
+
+              {filtered.length === 0 ? (
+                <div style={{ backgroundColor: cardBg, padding: '32px 16px', borderRadius: 12, textAlign: 'center', color: muted }}>
+                  <p>No matching sessions</p>
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {filtered.map((session) => (
+                    <div key={session.id} style={{ backgroundColor: cardBg, padding: 14, borderRadius: 10, border: `1px solid ${borderColor}` }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                        <div>
+                          <div style={{ fontSize: 14, fontWeight: 600 }}>
+                            {session.chargeAdded != null
+                              ? `${session.startPercent ?? '—'}% → ${session.endPercent ?? '—'}%`
+                              : `${session.energyAdded} kWh`}
+                            <span style={{
+                              marginLeft: 8, fontSize: 11, padding: '2px 6px', borderRadius: 4,
+                              backgroundColor: session.location === 'home' ? (isDark ? '#1a3a5c' : '#e3f2fd') : (isDark ? '#4a2c0a' : '#fff3e0'),
+                              color: session.location === 'home' ? '#64b5f6' : '#ffb74d',
+                            }}>
+                              {session.location === 'home' ? '🏠 Home' : '📍 Outside'}
+                            </span>
+                          </div>
+                          <div style={{ fontSize: 12, color: muted, marginTop: 4 }}>{formatDate(session.date)}</div>
+                        </div>
+                        <div style={{ textAlign: 'right' }}>
+                          <div style={{ fontWeight: 'bold' }}>{settings.currency}{session.cost}</div>
+                          <div style={{ fontSize: 12, color: muted }}>{session.energyAdded} kWh · {settings.currency}{session.rateUsed}/kWh</div>
+                        </div>
+                      </div>
+                      {session.notes && (
+                        <div style={{ fontSize: 12, color: muted, marginTop: 4, marginBottom: 6 }}>{session.notes}</div>
+                      )}
+                      <div style={{ display: 'flex', gap: 12, marginTop: 6 }}>
+                        <button onClick={() => startEdit(session)} style={{ background: 'none', border: 'none', color: '#0066cc', fontSize: 13, fontWeight: 600, padding: 0 }}>Edit</button>
+                        <button onClick={() => deleteSession(session.id)} style={{ background: 'none', border: 'none', color: '#e53935', fontSize: 13, fontWeight: 600, padding: 0 }}>Delete</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {screen === 'settings' && (
+            <div style={{ maxWidth: 600, margin: '0 auto', padding: '16px' }}>
+              <div style={{ display: 'flex', gap: 12, marginBottom: 16, alignItems: 'center' }}>
+                <button onClick={() => setScreen('dashboard')} style={{ background: 'none', border: 'none', fontSize: 20, cursor: 'pointer', color: textColor }}>←</button>
+                <h2 style={{ fontSize: 20, fontWeight: 'bold', margin: 0 }}>Settings</h2>
+              </div>
+
+              <div style={{ marginBottom: 20 }}>
+                <h3 style={{ fontSize: 14, fontWeight: 'bold', color: '#0066cc', margin: '0 0 12px 0' }}>Account</h3>
+                <div style={{ backgroundColor: cardBg, padding: 14, borderRadius: 10 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+                    {user.photoURL && (
+                      <img src={user.photoURL} alt="" style={{ width: 40, height: 40, borderRadius: '50%' }} referrerPolicy="no-referrer" />
+                    )}
+                    <div>
+                      <p style={{ fontWeight: 600, margin: 0 }}>{user.displayName || 'User'}</p>
+                      <p style={{ fontSize: 12, color: muted, margin: 0 }}>{user.email}</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={signOut}
+                    style={{
+                      width: '100%', padding: 10, borderRadius: 8,
+                      border: `1px solid ${borderColor}`, backgroundColor: 'transparent',
+                      color: '#e53935', fontWeight: 600, cursor: 'pointer',
+                    }}
+                  >
+                    Sign out
+                  </button>
+                </div>
+              </div>
+
+              <div style={{ marginBottom: 20 }}>
+                <h3 style={{ fontSize: 14, fontWeight: 'bold', color: '#0066cc', margin: '0 0 12px 0' }}>Vehicle</h3>
+                <div style={{ backgroundColor: cardBg, padding: 14, borderRadius: 10, display: 'flex', flexDirection: 'column', gap: 12 }}>
+                  <div>
+                    <label style={{ fontSize: 12, fontWeight: 'bold', display: 'block', marginBottom: 4 }}>Vehicle Name</label>
+                    <input
+                      value={settings.vehicleName}
+                      onChange={e => setSettings({ ...settings, vehicleName: e.target.value })}
+                      style={{ width: '100%', padding: 10, borderRadius: 8, border: `1px solid ${borderColor}`, backgroundColor: isDark ? '#1c1c1e' : '#fff', color: textColor }}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 12, fontWeight: 'bold', display: 'block', marginBottom: 4 }}>Battery Capacity (kWh)</label>
+                    <input
+                      type="number" min="1" step="0.1"
+                      value={settings.batteryCapacity}
+                      onChange={e => setSettings({ ...settings, batteryCapacity: Number(e.target.value) || 0 })}
+                      style={{ width: '100%', padding: 10, borderRadius: 8, border: `1px solid ${borderColor}`, backgroundColor: isDark ? '#1c1c1e' : '#fff', color: textColor }}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ marginBottom: 20 }}>
+                <h3 style={{ fontSize: 14, fontWeight: 'bold', color: '#0066cc', margin: '0 0 12px 0' }}>Home Tariff & Currency</h3>
+                <div style={{ backgroundColor: cardBg, padding: 14, borderRadius: 10, display: 'flex', flexDirection: 'column', gap: 12 }}>
+                  <div>
+                    <label style={{ fontSize: 12, fontWeight: 'bold', display: 'block', marginBottom: 4 }}>Home rate ({settings.currency}/kWh)</label>
+                    <input
+                      type="number" min="0" step="0.1"
+                      value={settings.tariff}
+                      onChange={e => setSettings({ ...settings, tariff: Number(e.target.value) || 0 })}
+                      style={{ width: '100%', padding: 10, borderRadius: 8, border: `1px solid ${borderColor}`, backgroundColor: isDark ? '#1c1c1e' : '#fff', color: textColor }}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 12, fontWeight: 'bold', display: 'block', marginBottom: 4 }}>Currency symbol</label>
+                    <input
+                      value={settings.currency}
+                      onChange={e => setSettings({ ...settings, currency: e.target.value })}
+                      style={{ width: '100%', padding: 10, borderRadius: 8, border: `1px solid ${borderColor}`, backgroundColor: isDark ? '#1c1c1e' : '#fff', color: textColor }}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ marginBottom: 20 }}>
+                <h3 style={{ fontSize: 14, fontWeight: 'bold', color: '#0066cc', margin: '0 0 12px 0' }}>Appearance</h3>
+                <div style={{ backgroundColor: cardBg, padding: 14, borderRadius: 10 }}>
+                  <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}>
+                    <span style={{ fontWeight: 500 }}>Dark mode</span>
+                    <input
+                      type="checkbox"
+                      checked={settings.darkMode}
+                      onChange={e => setSettings({ ...settings, darkMode: e.target.checked })}
+                      style={{ width: 20, height: 20 }}
+                    />
+                  </label>
+                </div>
+              </div>
+
+              <div style={{ fontSize: 12, color: muted, textAlign: 'center', marginTop: 24 }}>
+                <p>Charge Calc · Offline-first PWA</p>
+                <p style={{ margin: '4px 0 0' }}>Project: chargecalc-eb2dd</p>
+              </div>
+            </div>
+          )}
+
+          {screen === 'dashboard' && (
+            <button
+              className="fab"
+              onClick={() => {
+                setEditingId(null);
+                setCurrentSession({
+                  location: 'home',
+                  startPercent: null,
+                  endPercent: null,
+                  energyKwh: null,
+                  notes: '',
+                  customRate: null,
+                  date: new Date().toISOString().slice(0, 16),
+                });
+                setScreen('log');
+              }}
+              aria-label="Log charge"
+            >
+              +
+            </button>
+          )}
+
+          <div style={{
+            position: 'fixed',
+            bottom: 0,
+            left: 0,
+            right: 0,
+            display: 'flex',
+            backgroundColor: isDark ? '#2c2c2e' : 'white',
+            borderTop: `1px solid ${borderColor}`,
+            paddingBottom: 'env(safe-area-inset-bottom, 0px)',
+            zIndex: 20,
+          }}>
+            {[
+              { id: 'dashboard', label: '⚡ Dashboard' },
+              { id: 'history', label: '📊 History' },
+            ].map(item => (
+              <button
+                key={item.id}
+                onClick={() => setScreen(item.id)}
+                style={{
+                  flex: 1,
+                  backgroundColor: 'transparent',
+                  border: 'none',
+                  color: screen === item.id ? '#0066cc' : muted,
+                  padding: '12px 0',
+                  fontSize: 12,
+                  fontWeight: screen === item.id ? 'bold' : 'normal',
+                  borderTop: screen === item.id ? '3px solid #0066cc' : '3px solid transparent',
+                  cursor: 'pointer',
+                }}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.render(<ChargeCalcEV />, document.getElementById('root'));
+  </script>
+
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js')
+          .then((reg) => console.log('Charge Calc SW registered:', reg.scope))
+          .catch((err) => console.warn('SW registration failed:', err));
+      });
+    }
+  </script>
+</body>
 </html>
